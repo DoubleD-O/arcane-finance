@@ -1,0 +1,10 @@
+# Reporting currency (SGD) per 1 unit of local currency. Synthetic rates.
+[actual]
+SGD = "1"
+AUD = "0.86"
+USD = "1.30"
+
+[budget]
+SGD = "1"
+AUD = "0.88"
+USD = "1.32"

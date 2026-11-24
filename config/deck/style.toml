@@ -1,0 +1,15 @@
+# Deck colours and sizes the code applies itself (a PowerPoint theme does not reach them).
+# They match the starter template's office design. Every key is optional: delete one to fall back to
+# the tool's original built-in value (shown in docs/deck-styling.md).
+# How to use this file and the template next to it: docs/deck-styling.md.
+
+[colors]                  # hex RGB, as in PowerPoint's "More Colors > Custom > Hex"
+favourable = "2F855A"     # EBITDA bridge: bars and labels that improve on budget (green)
+unfavourable = "C0392B"   # EBITDA bridge: bars and labels that fall short of budget (red)
+total = "1F3864"          # EBITDA bridge: the budget and actual totals (navy)
+table_header = "1F3864"   # table header fill (navy); comment out to use the template's table style
+footer_text = "6B7785"    # the release, period and checksum line on every slide (mid grey)
+
+[fonts]                   # points
+table_size = 13           # main tables and the bridge chart; the bridge figures, changes and actions tables are 1-2 pt smaller
+footer_size = 10

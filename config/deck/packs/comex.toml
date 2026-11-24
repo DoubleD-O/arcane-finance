@@ -1,0 +1,30 @@
+# The Comex pack: the default deck. Which slides, in what order, with what titles and options.
+# How to edit a pack, and every slide type: docs/deck-styling.md, "Choosing and editing packs".
+
+name = "Comex pack"
+title = "APAC Comex pack, {period_long}"   # placeholders: {period}, {period_long}, {release}, {currency}
+
+[[slides]]
+type = "title"
+
+[[slides]]
+type = "kpi_scorecard"
+title = "KPI scorecard, APAC"
+kpis = ["revenue", "gross_margin", "gm_pct", "ebitda", "ebitda_pct"]
+
+[[slides]]
+type = "pnl"
+scope = "APAC"            # "APAC", a market code, or "each_market" (one slide per market)
+
+[[slides]]
+type = "markets"
+
+[[slides]]
+type = "bridge"
+kpi = "ebitda"            # revenue | gross_margin | ebitda
+
+[[slides]]
+type = "changes"          # skipped when the release has no previous release
+
+[[slides]]
+type = "outlook"          # needs commentary; without it the deck is DRAFT

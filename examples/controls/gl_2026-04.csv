@@ -1,0 +1,6 @@
+journal_id,period,market,account,amount,reference,description
+JE-0401,2026-04,SG,OTH,-100000.00,A-001,Reversal of A-001
+JE-0402,2026-04,SG,OTH,-60000.00,A-003,Reversal of A-003
+JE-0403,2026-04,SG,RENT,-12000.00,A-004,Reversal of A-004
+JE-0404,2026-04,SG,RENT,-12000.00,A-005,Reversal of A-005
+JE-0405,2026-04,SG,PAY,-8000.00,A-006,Reversal of A-006

@@ -1,0 +1,34 @@
+# Hand-check from the original brief: 1,000 units at prices 10 and 20; mix 80/20 gives revenue 12,000, 60/40 gives 14,000.
+[setup]
+entity = "Mix check (demo)"
+currency = "SGD"
+first_month = "2027-01"
+months = 12
+
+[volume]
+base_units = "1000"
+growth_pct_month = "0"
+seasonality = ["1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1"]
+
+[[products]]
+id = "A"
+name = "Product A"
+list_price = "10"
+discount_pct = "0"
+unit_cost = "0"
+mix_pct = "80"
+
+[[products]]
+id = "B"
+name = "Product B"
+list_price = "20"
+discount_pct = "0"
+unit_cost = "0"
+mix_pct = "20"
+
+[tax]
+rate_pct = "0"
+
+[scenarios.mix_shift]
+products.A.mix_pct = "60"
+products.B.mix_pct = "40"

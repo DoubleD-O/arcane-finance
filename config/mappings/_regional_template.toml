@@ -1,0 +1,22 @@
+# The regional submission template (fct templates write: submission_template.xlsx).
+# No market: a market that fills the template points its `mapping` in close.toml here.
+# Amounts are entered as on the P&L, revenue and costs both positive.
+sign = "pl_natural"
+
+[layout]
+format = "xlsx"
+sheet = "Submission"
+header_row = 1
+period_column = "Period"
+account_column = "Account"
+description_column = "Description"
+amount_column = "Amount"
+
+[accounts]
+"REV" = "REV"
+"COGS" = "COGS"
+"PAY" = "PAY"
+"RENT" = "RENT"
+"MKT" = "MKT"
+"OTH" = "OTH"
+"DEP" = "DEP"

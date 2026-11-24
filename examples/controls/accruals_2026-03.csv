@@ -1,0 +1,7 @@
+accrual_id,market,period,account,supplier,reference,amount,owner,description
+A-001,SG,2026-03,OTH,Harbour Advisory,PO-1001,100000.00,SG finance analyst,March advisory work
+A-002,SG,2026-03,MKT,Lumen Media,PO-1002,40000.00,SG finance analyst,March campaign
+A-003,SG,2026-03,OTH,Northpoint Research,PO-1003,60000.00,SG finance analyst,Market study phase 1
+A-004,SG,2026-03,RENT,Keystone Facilities,,12000.00,SG office manager,March facilities services
+A-005,SG,2026-03,RENT,Keystone Facilities,,12000.00,SG office manager,March maintenance
+A-006,SG,2026-03,PAY,Brightside Staffing,PO-1006,8000.00,,March contractor hours

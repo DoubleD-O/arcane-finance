@@ -1,0 +1,20 @@
+# The board pack: headline KPIs, the EBITDA bridge and the outlook.
+# How to edit a pack: docs/deck-styling.md, "Choosing and editing packs".
+
+name = "Board pack"
+title = "APAC Board pack, {period_long}"
+
+[[slides]]
+type = "title"
+
+[[slides]]
+type = "kpi_scorecard"
+title = "Headline KPIs, APAC"
+kpis = ["revenue", "ebitda", "ebitda_pct"]
+
+[[slides]]
+type = "bridge"
+kpi = "ebitda"
+
+[[slides]]
+type = "outlook"

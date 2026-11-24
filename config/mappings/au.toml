@@ -1,0 +1,19 @@
+market = "AU"
+sign = "pl_natural"
+
+[layout]
+format = "xlsx"
+sheet = "P&L"
+header_row = 3
+account_column = "Account"
+description_column = "Account Name"
+amount_column = "Amount AUD"
+
+[accounts]
+"41000" = "REV"
+"50000" = "COGS"
+"61000" = "PAY"
+"62000" = "RENT"
+"63000" = "MKT"
+"69000" = "OTH"
+"71000" = "DEP"

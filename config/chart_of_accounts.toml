@@ -1,0 +1,27 @@
+[accounts.REV]
+name = "Revenue"
+type = "revenue"
+
+[accounts.COGS]
+name = "Direct costs"
+type = "cogs"
+
+[accounts.PAY]
+name = "Staff costs"
+type = "opex"
+
+[accounts.RENT]
+name = "Rent and facilities"
+type = "opex"
+
+[accounts.MKT]
+name = "Marketing"
+type = "opex"
+
+[accounts.OTH]
+name = "Other operating costs"
+type = "opex"
+
+[accounts.DEP]
+name = "Depreciation"
+type = "below_ebitda"

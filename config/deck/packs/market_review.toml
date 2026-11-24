@@ -1,0 +1,20 @@
+# The market review: every market's P&L, and what changed since the previous release.
+# It has no outlook slide, so it needs no commentary.
+# How to edit a pack: docs/deck-styling.md, "Choosing and editing packs".
+
+name = "Market review"
+title = "APAC market review, {period_long}"
+
+[[slides]]
+type = "title"
+
+[[slides]]
+type = "markets"
+
+[[slides]]
+type = "pnl"
+scope = "each_market"
+title = "P&L vs budget, {market}"
+
+[[slides]]
+type = "changes"

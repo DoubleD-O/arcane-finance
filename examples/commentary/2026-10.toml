@@ -1,0 +1,12 @@
+# Synthetic commentary for the demo. Plain text; never executed.
+outlook = "Q4 outlook holds. SG services pipeline supports budget; AU margin pressure from cost of sales and one-off consulting fees."
+
+[[actions]]
+action = "Confirm AU consulting fees are one-off and agree November accrual"
+owner = "AU country controller"
+due = "2026-12-05"
+
+[[actions]]
+action = "Review AU pricing against budget rate assumptions"
+owner = "Regional FP&A lead"
+due = "2026-12-12"

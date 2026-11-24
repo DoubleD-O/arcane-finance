@@ -1,0 +1,41 @@
+reporting_currency = "SGD"
+chart_of_accounts = "chart_of_accounts.toml"
+scenarios = ["actual", "budget"]
+due_day = 5
+regional_owner = "Regional FP&A lead"
+
+[[markets]]
+code = "SG"
+name = "Singapore (synthetic)"
+currency = "SGD"
+owner = "SG country controller"
+mapping = "mappings/sg.toml"
+
+[[markets]]
+code = "AU"
+name = "Australia (synthetic)"
+currency = "AUD"
+owner = "AU country controller"
+mapping = "mappings/au.toml"
+
+[materiality.revenue]
+abs = 25000
+pct = 2.0
+
+[materiality.gross_margin]
+abs = 15000
+pct = 2.0
+
+[materiality.ebitda]
+abs = 10000
+pct = 5.0
+
+[controls]
+owners = ["SG finance analyst", "SG office manager", "AU country controller", "AP team", "Accounting team", "Regional close lead"]
+ap_role = "AP team"
+accounting_role = "Accounting team"
+close_lead = "Regional close lead"
+tolerance_abs = 1000
+tolerance_pct = 5.0
+approver_roles = ["Regional close lead", "Accounting team"]
+explain_approval_abs = 25000

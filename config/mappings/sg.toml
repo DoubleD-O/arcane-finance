@@ -1,0 +1,20 @@
+market = "SG"
+sign = "tb"
+
+[layout]
+format = "csv"
+header_row = 1
+period_column = "Period"
+account_column = "GL Code"
+description_column = "Description"
+amount_column = "Amount (SGD)"
+
+[accounts]
+"4000" = "REV"
+"4010" = "REV"
+"5000" = "COGS"
+"6000" = "PAY"
+"6100" = "RENT"
+"6200" = "MKT"
+"6900" = "OTH"
+"7000" = "DEP"

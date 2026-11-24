@@ -1,0 +1,5 @@
+invoice_id,market,supplier,invoice_date,period,account,reference,amount
+INV-5501,SG,Harbour Advisory,2026-04-08,2026-04,OTH,PO-1001,110000.00
+INV-5502,SG,Lumen Media,2026-04-10,2026-04,MKT,PO-1002,40000.00
+INV-5503,SG,Northpoint Research,2026-04-15,2026-04,OTH,PO-1003,25000.00
+INV-5504,SG,Keystone Facilities,2026-04-12,2026-04,RENT,,12000.00

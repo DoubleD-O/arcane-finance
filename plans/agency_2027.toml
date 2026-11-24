@@ -1,0 +1,97 @@
+# Synthetic plan for a small agency entity. Amounts in SGD. Curves list the share settled in
+# month +0, +1, +2 ... of the month the amount arises; opening schedules start at the first month.
+
+[setup]
+entity = "Synthetic Agency SG (demo)"
+currency = "SGD"
+first_month = "2027-01"
+months = 12
+
+[opening]                     # balance sheet at 2026-12-31
+cash = "200000"
+accounts_receivable = "60000"
+fixed_assets_cost = "120000"
+accumulated_depreciation = "0"
+fixed_assets_remaining_life_months = 24
+accounts_payable = "30000"
+tax_payable = "0"
+debt = "0"
+share_capital = "300000"
+retained_earnings = "50000"
+
+[volume]
+base_units = "2000"
+growth_pct_month = "0"
+seasonality = ["1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1"]
+
+[[products]]
+id = "P1"
+name = "Standard service"
+list_price = "10"
+discount_pct = "0"
+unit_cost = "4"
+mix_pct = "80"
+
+[[products]]
+id = "P2"
+name = "Premium service"
+list_price = "20"
+discount_pct = "0"
+unit_cost = "9"
+mix_pct = "20"
+
+[[hires]]
+id = "H1"
+role = "Account manager"
+fte = "1"
+monthly_salary = "3000"
+on_cost_pct = "10"
+start_month = "2027-01"
+
+[[hires]]
+id = "H2"
+role = "Designer"
+fte = "1"
+monthly_salary = "2000"
+on_cost_pct = "10"
+start_month = "2027-04"
+
+[[opex]]
+id = "RENT"
+name = "Office rent"
+monthly_amount = "1000"
+start_month = "2027-01"
+
+[collections]
+curve = ["0", "100"]
+opening_ar_schedule = ["100"]
+
+[payments]                    # applies to COGS and other opex; payroll is paid in the month
+curve = ["0", "100"]
+opening_ap_schedule = ["100"]
+
+[[capex]]
+id = "FITOUT"
+name = "Studio fit-out"
+amount = "12000"
+spend_month = "2027-03"
+in_service_month = "2027-05"
+useful_life_months = 24
+
+[debt]
+rate_pct = "6"
+drawdowns = [{ month = "2027-02", amount = "50000" }]
+repayments = [{ month = "2027-11", amount = "50000" }]
+
+[tax]
+rate_pct = "17"
+
+[equity]
+injections = []
+dividends = []
+
+[scenarios.slow_collections]
+collections.curve = ["0", "50", "50"]
+
+[scenarios.delayed_hire]
+hires.H2.start_month = "2027-06"
