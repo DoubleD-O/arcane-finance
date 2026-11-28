@@ -1,5 +1,7 @@
 # Arcane Finance: an APAC regional close toolkit
 
+[![tests](https://github.com/DoubleD-O/arcane-finance/actions/workflows/tests.yml/badge.svg)](https://github.com/DoubleD-O/arcane-finance/actions/workflows/tests.yml)
+
 **From country submissions to an approved Comex pack. See what changed, reconcile the figures, and reproduce the version leadership saw.**
 
 A working Python prototype of the monthly regional close, built on synthetic data. Country controllers send their numbers in their own Excel or CSV layouts. Regional FP&A turns them into one approved, versioned release, sees exactly what a late correction would change before approving it, and produces the Comex deck from that release. Every figure on every slide traces back to a file, a sheet and a row.
@@ -25,6 +27,8 @@ This toolkit makes those three answers routine.
 | **Close controls** | Follows each accrual from Finance to the AP invoice to the ledger reversal. Problems land in the right queue (Finance, AP, Accounting, close lead) with the amount at risk and the evidence. An item clears only with ledger evidence or a resolution approved by a second person. |
 | **Planning** | A driver-based plan of up to 36 months (volume, price and mix, hiring, opex, working capital, capex, debt, tax) rolled through P&L, balance sheet and cash flow, with scenarios. It ties to the cent every month, with no plug. Any month can become a market's budget submission. |
 | **Templates** | Ready-to-fill Excel templates for every input, with instructions generated from the configuration, and a preview of how any file will be read before it is imported. |
+| **Needs attention** | Every flagged item (a missing or failed file, a material change, a close-controls problem) is New, Acknowledged, Resolved or Reopened, with an assignee, a due date and its history. Only the data resolves an item. A problem that comes back reopens with its earlier history. Each release records what was still open when it was approved. |
+| **Sign-in and approvals** | Once the first user exists, every action belongs to a signed-in person acting in one of their roles, stamped with the real time. Resolutions and other sensitive actions need a second person's approval from their own sign-in, and an approval is refused if the facts changed since the request. |
 
 Everything runs locally: a command-line tool (`fct`) and a browser UI (`fct ui`) over the same library.
 
@@ -69,7 +73,7 @@ The design documents in [docs/](docs/) record each decision: sign conventions, F
 ## Limits
 
 - Synthetic data only. It has never been connected to a real ledger or ERP.
-- Roles are typed in, not logged in. The approval rules prevent honest mistakes, not deliberate misuse.
+- Sign-in is local to one machine and one store. An admin can reset passwords, and so impersonate a user; that shows in the user history. Anyone who can edit the store file directly can change it.
 - Single user, local DuckDB store. Not a hosted, multi-user service.
 
 ## License

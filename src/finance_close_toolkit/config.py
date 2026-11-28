@@ -206,6 +206,7 @@ class ControlsConfig:
     tolerance_pct: Decimal
     approver_roles: tuple[str, ...]  # who may approve a resolution, an override link or a large explanation
     explain_approval_abs: Decimal  # an explanation of a larger variance (local currency) needs an approver
+    due_days: int = 5  # a needs-attention item is due this many working days after the period's last day
 
     def tolerance(self, accrued: Decimal) -> Decimal:
         return max(self.tolerance_abs, abs(accrued) * self.tolerance_pct / 100)
@@ -213,6 +214,14 @@ class ControlsConfig:
 
 DEFAULT_APPROVER_ROLES = ["Regional close lead", "Accounting team"]
 DEFAULT_EXPLAIN_APPROVAL_ABS = 25000
+DEFAULT_DUE_DAYS = 5
+DEFAULT_FOLLOWUP_DAYS = 2
+
+
+def _due_days(value: object, where: str, name: str = "due_days") -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ConfigError(f"{where} {name} must be a whole number of working days, got {value!r}")
+    return value
 
 
 def parse_controls(raw: dict) -> ControlsConfig:
@@ -236,6 +245,7 @@ def parse_controls(raw: dict) -> ControlsConfig:
         approver_roles=tuple(approvers),
         explain_approval_abs=_decimal(raw.get("explain_approval_abs", DEFAULT_EXPLAIN_APPROVAL_ABS),
                                       f"{where} explain_approval_abs"),
+        due_days=_due_days(raw.get("due_days", DEFAULT_DUE_DAYS), where),
         **roles,
     )
 
@@ -251,6 +261,8 @@ class CloseConfig:
     materiality: MappingT[str, Materiality]
     coa_path: Path
     controls: ControlsConfig | None = None
+    # a close-board item that first appears after the calendar due date is due this many working days later
+    followup_days: int = DEFAULT_FOLLOWUP_DAYS
 
     def require_controls(self) -> ControlsConfig:
         if self.controls is None:
@@ -285,6 +297,8 @@ def load_close_config(path: Path) -> CloseConfig:
         materiality=materiality,
         coa_path=base / raw["chart_of_accounts"],
         controls=parse_controls(raw["controls"]) if "controls" in raw else None,
+        followup_days=_due_days(raw.get("attention", {}).get("followup_days", DEFAULT_FOLLOWUP_DAYS), "[attention]",
+                                "followup_days"),
     )
 
 

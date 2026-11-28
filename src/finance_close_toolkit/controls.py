@@ -16,8 +16,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal, Mapping
 
+from . import identity
 from .config import (ConfigError, ControlsConfig, ControlsMapping, SourceFormat, Workspace,
                      canonical_controls_mapping, load_controls_mapping, version_of)
+from .identity import Actor, Person
 from .intake import CellRow, IntakeError, closest_header, read_cells
 from .money import ZERO, fmt_money, fmt_step
 from .templates import TEMPLATES as INPUT_TEMPLATES, ColumnType
@@ -369,6 +371,7 @@ class ControlImport:
     seq: int  # of this receipt: a stored import received again is current again
     rows: tuple[Row, ...]
     mapping: str = "template columns"  # mapping_label of what read it
+    logged_at: datetime | None = None  # the real clock in signed-in mode; imported_at is the effective time
 
     @property
     def label(self) -> str:
@@ -389,6 +392,12 @@ class Event:
     evidence: str
     data: Mapping[str, str] = field(default_factory=dict)  # kind-specific fields, amounts as plain text
     seq: int = 0  # assigned by the store
+    person: Person | None = None  # who acted in the role `by`; None for events recorded in open mode
+    logged_at: datetime | None = None  # the real clock in signed-in mode; `at` is the effective time
+
+    @property
+    def by_label(self) -> str:
+        return Actor(self.by, self.person).label
 
     @property
     def invoice_id(self) -> str:
@@ -969,7 +978,7 @@ def pending_entries(s: AccrualState) -> tuple[PendingEntry, ...]:
 
 def pending_text(e: PendingEntry) -> str:
     return (f"{e.accrual_id} {e.kind} {fmt_step(e.pl_effect)} in {e.period} (Dr {e.debit} / Cr {e.credit}; "
-            f"approved by {e.resolution.data['approved_by']})")
+            f"approved by {approver_text(e.resolution.data)})")
 
 
 @dataclass(frozen=True)
@@ -1044,8 +1053,8 @@ def evidence_rows(s: AccrualState) -> list[tuple[str, str, str, str, str, str]]:
 
 def resolution_text(e: Event) -> str:
     d = e.data
-    return (f"{d['issue']}: {d['resolve_kind']} {fmt_money(Decimal(d['amount']))} by {e.by}, approved by "
-            f"{d['approved_by']}; reason: {d['reason']}")
+    return (f"{d['issue']}: {d['resolve_kind']} {fmt_money(Decimal(d['amount']))} by {e.by_label}, approved by "
+            f"{approver_text(d)}; reason: {d['reason']}")
 
 
 def net_text(n: NetEffect) -> str:
@@ -1064,12 +1073,22 @@ PENDING_HEADING = "Pending entries, not yet in the ledger"
 class HistoryItem:
     at: datetime
     what: str
-    by: str  # role, or "import"
+    by: str  # the person and role, the role alone (open mode), or "import"
     detail: str
+    logged_at: datetime | None = None  # when it was recorded, if that differs from `at` (signed-in mode)
+
+    @property
+    def when(self) -> str:
+        return identity.when_text(self.at, self.logged_at)
+
+
+def approver_text(d: Mapping[str, str]) -> str:
+    """Who approved an event: the person and their role, or the role alone for an event from open mode."""
+    return f"{d['approved_by_name']} ({d['approved_by']})" if d.get("approved_by_name") else d["approved_by"]
 
 
 def _approval(d: Mapping[str, str]) -> str:
-    return f"; approved by {d['approved_by']}" if d.get("approved_by") else ""
+    return f"; approved by {approver_text(d)}" if d.get("approved_by") else ""
 
 
 def _event_text(e: Event) -> tuple[str, str]:
@@ -1086,7 +1105,7 @@ def _event_text(e: Event) -> tuple[str, str]:
         return (f"{d['item_kind'].capitalize()} {d['item']} dropped by import",
                 f"{d['file']} replaced {d['replaced']}; reason: {d['reason']}")
     return (f"Resolved: {d['resolve_kind']} {fmt_money(Decimal(d['amount']))}",
-            f"{d['issue']}; approved by {d['approved_by']}; reason: {d['reason']}; {e.evidence}")
+            f"{d['issue']}; approved by {approver_text(d)}; reason: {d['reason']}; {e.evidence}")
 
 
 def history(c: Controls, accrual_id: str) -> tuple[HistoryItem, ...]:
@@ -1101,26 +1120,26 @@ def history(c: Controls, accrual_id: str) -> tuple[HistoryItem, ...]:
             row = next((r for r in imp.rows if r.accrual_id == accrual_id), None)
             if row is not None:
                 items.append(HistoryItem(imp.imported_at, "Accrual imported", "import",
-                                         f"{row.source}, {fmt_money(row.amount)}"))
+                                         f"{row.source}, {fmt_money(row.amount)}", imp.logged_at))
         elif imp.kind == "invoices":
             for r in imp.rows:
                 if r.invoice_id in linked:
                     items.append(HistoryItem(imp.imported_at, f"Invoice {r.invoice_id} imported", "import",
-                                             f"{r.source}, {fmt_money(r.amount)}"))
+                                             f"{r.source}, {fmt_money(r.amount)}", imp.logged_at))
         elif imp.period == s.reversal_period:
             lines = tuple(r for r in imp.rows if _reverses(r, a))
             state = _reversal_state(imp, lines, a)
             if state == "missing":
                 items.append(HistoryItem(imp.imported_at, "Reversal missing", "import",
-                                         f"{imp.file_name} has no line reversing {accrual_id}"))
+                                         f"{imp.file_name} has no line reversing {accrual_id}", imp.logged_at))
             else:
                 items.append(HistoryItem(imp.imported_at, "Reversal confirmed" if state == "ledger_confirmed"
                                          else "Reversal mismatch", "import",
-                                         "; ".join(f"{l.journal_id}, {l.source}" for l in lines)))
+                                         "; ".join(f"{l.journal_id}, {l.source}" for l in lines), imp.logged_at))
     for e in c.events:
         if e.accrual_id == accrual_id:
             what, detail = _event_text(e)
-            items.append(HistoryItem(e.at, what, e.by, detail))
+            items.append(HistoryItem(e.at, what, e.by_label, detail, e.logged_at))
     for lapse in s.lapsed:
         # Shown when the newest import after the event arrived: the facts changed with an import.
         later = [imp.imported_at for imp in c.imports if imp.imported_at >= lapse.event.at]
@@ -1142,7 +1161,7 @@ def load(store: Store, ws: Workspace, as_of: datetime | None = None) -> Controls
     return derive(store.control_imports(), store.control_events(), cfg, currencies(ws), as_of)
 
 
-Outcome = Literal["recorded", "no_op", "refused"]
+Outcome = Literal["recorded", "no_op", "refused", "requested"]
 
 
 @dataclass(frozen=True)
@@ -1232,13 +1251,17 @@ def _drop_blockers(c: Controls, kind: Kind, item: str) -> tuple[str, tuple[str, 
 
 def import_files(store: Store, ws: Workspace, files: Mapping[Kind, tuple[str, bytes]],
                  now: datetime | None = None, allow_drop: bool = False, reason: str = "",
-                 by: str = "", mappings: Mapping[Kind, ControlsMapping] | None = None) -> tuple[ImportResult, ...]:
+                 by: Actor | str = "",
+                 mappings: Mapping[Kind, ControlsMapping] | None = None) -> tuple[ImportResult, ...]:
     """Parse every given file first, each through `mappings[kind]` or its default mapping; store none unless
     all parse and none drops an accrual or invoice that has open issues, links or events (unless allowed, with
     a reason, recorded as a drop event). A file stored before but not current becomes current again, recorded
     as received now; one that is current already is a no-op."""
     cfg = ws.config.require_controls()
     now = now or datetime.now().replace(microsecond=0)
+    by = identity.actor(by)
+    if refusal := identity.sign_in_refusal(store, by):
+        raise ControlsError(refusal)
     mappings = mappings or {}
     parsed = [parse_file(kind, data, name, ws, mappings.get(kind))
               for kind in KINDS if kind in files for name, data in [files[kind]]]
@@ -1272,13 +1295,17 @@ def import_files(store: Store, ws: Workspace, files: Mapping[Kind, tuple[str, by
                                 "allow drops with a reason and who you are (--allow-drop --reason --by).")
         if not reason.strip():
             raise ControlsError(f"Dropping needs a reason.\n{listed}")
-        if by not in cfg.owners:
-            raise ControlsError(f"Dropping needs who is acting (--by), one of: {', '.join(cfg.owners)}; got {by!r}.")
-        events = [Event("drop", cites, by, now, f"{f.file_name} replacing {before.file_name}",
+        if by.role not in cfg.owners:
+            raise ControlsError(f"Dropping needs who is acting (--by), one of: {', '.join(cfg.owners)}; "
+                                f"got {by.role!r}.")
+        events = [Event("drop", cites, by.role, now, f"{f.file_name} replacing {before.file_name}",
                         {"item": item, "item_kind": f.kind[:-1], "file": f.file_name, "replaced": before.file_name,
-                         "reason": reason.strip(), "why": "; ".join(why)})
+                         "reason": reason.strip(), "why": "; ".join(why)}, person=by.person)
                   for f, before, item, cites, why in drops]
-    store.save_control_files(tuple(new), now, tuple(events))
+    from . import workflow  # the workflow reads close controls
+
+    with workflow.recording(store, ws, now, by):
+        store.save_control_files(tuple(new), now, tuple(events))
     return tuple(results)
 
 
@@ -1299,10 +1326,84 @@ def _refused(message: str) -> ActionResult:
     return ActionResult("refused", message + " Nothing recorded.")
 
 
-def _role_check(by: str, allowed: tuple[str, ...], action: str) -> ActionResult | None:
-    if by in allowed:
+def _role_check(by: Actor, allowed: tuple[str, ...], action: str) -> ActionResult | None:
+    if by.role in allowed:
         return None
-    return _refused(f"{by!r} may not {action}; allowed: {', '.join(allowed)}.")
+    return _refused(f"{by.role!r} may not {action}; allowed: {', '.join(allowed)}.")
+
+
+# Two-person approvals (docs/design-logins.md). In signed-in mode an action that needs a second person is recorded
+# as a request; an approver approves it from their own sign-in, which records the action exactly as the one-step
+# approved action of open mode, so derived states and figures are the same.
+
+ApprovalAction = Literal["link", "explain", "resolve"]
+
+
+@dataclass(frozen=True)
+class Request:
+    request_id: int  # assigned by the store
+    action: ApprovalAction
+    item: str  # the invoice (link) or the accrual (explain, resolve)
+    args: Mapping[str, str]  # the action's own arguments, replayed when it is approved
+    requester: Actor
+    at: datetime
+    summary: tuple[str, ...]  # what the approver needs to see: item, amount, evidence, reason
+    owner: str | None = None  # the accrual's owner when requested
+    facts: Mapping[str, str] = field(default_factory=dict)  # the figures in the summary; approval needs them unchanged
+    logged_at: datetime | None = None  # the real clock; `at` is the effective time
+
+    def __post_init__(self) -> None:
+        if self.requester.person is None:
+            raise ValueError("a request is made by a signed-in person")
+
+
+@dataclass(frozen=True)
+class Decision:
+    request_id: int
+    approved: bool
+    approver: Actor
+    requester: Person
+    at: datetime
+    reason: str = ""
+    logged_at: datetime | None = None  # the real clock; `at` is the effective time
+
+    def __post_init__(self) -> None:
+        if self.approver.person is None or self.approver.person.username == self.requester.username:
+            raise ValueError("a decision names two different people: the requester and the approver")
+
+
+@dataclass(frozen=True)
+class Approval:
+    """`approved_by` in the approvals flow: an approver's own sign-in approving one request."""
+
+    request: Request
+    approver: Actor
+
+    def decision(self, at: datetime) -> Decision:
+        return Decision(self.request.request_id, True, self.approver, self.request.requester.person, at)
+
+
+ApprovedBy = str | Approval  # a role typed in open mode, or an Approval in signed-in mode
+
+
+def _approver(approved_by: ApprovedBy) -> Actor | None:
+    if isinstance(approved_by, Approval):
+        return approved_by.approver
+    return Actor(approved_by) if approved_by else None
+
+
+def _gate(store: Store, by: Actor, approved_by: ApprovedBy) -> ActionResult | None:
+    """Signed-in mode: a person acts, and a second person approves only through an approval request."""
+    if refusal := identity.sign_in_refusal(store, by):
+        return _refused(refusal)
+    if isinstance(approved_by, str) and approved_by and identity.signed_in_mode(store):
+        return _refused(identity.OWN_SIGN_IN)
+    return None
+
+
+def _asks(store: Store, approved_by: ApprovedBy) -> bool:
+    """True when the approval this action needs has to be requested rather than checked now."""
+    return not isinstance(approved_by, Approval) and identity.signed_in_mode(store)
 
 
 def allowed_approvers(cfg: ControlsConfig, by: str, owner: str | None = None) -> tuple[str, ...]:
@@ -1310,29 +1411,96 @@ def allowed_approvers(cfg: ControlsConfig, by: str, owner: str | None = None) ->
     return tuple(r for r in cfg.approver_roles if r not in (by, owner))
 
 
-def _approval_check(cfg: ControlsConfig, by: str, approved_by: str, actor: str, owner: str | None = None,
+def _approval_check(cfg: ControlsConfig, by: Actor, approver: Actor | None, actor: str, owner: str | None = None,
                     what: str = "This") -> ActionResult | None:
-    """Segregation of duties: an approver from approver_roles, other than the actor and the accrual's owner."""
-    if not approved_by:
+    """Segregation of duties: an approver from approver_roles, other than the actor (role and person) and the
+    accrual's owner."""
+    if approver is None:
         return _refused(f"{what} needs an approver; no approver given. It must be approved by one of: "
-                        f"{', '.join(allowed_approvers(cfg, by, owner))}.")
-    if approved_by == by:
-        return _refused(f"The approver must differ from {actor} ({by}).")
-    if approved_by not in cfg.approver_roles:
-        return _refused(f"{approved_by!r} may not approve; approver roles: {', '.join(cfg.approver_roles)}.")
-    if approved_by == owner:
+                        f"{', '.join(allowed_approvers(cfg, by.role, owner))}.")
+    if approver.role == by.role:
+        return _refused(f"The approver must differ from {actor} ({by.role}).")
+    if approver.person and by.person and approver.person.username == by.person.username:
+        return _refused(f"The approver must be another person than {actor} ({by.person.display_name}).")
+    if approver.role not in cfg.approver_roles:
+        return _refused(f"{approver.role!r} may not approve; approver roles: {', '.join(cfg.approver_roles)}.")
+    if approver.role == owner:
         return _refused(f"The approver must differ from the accrual's owner ({owner}).")
     return None
 
 
-def _record(store: Store, event: Event, message: str) -> ActionResult:
-    store.add_control_event(event)
+def _approval_data(approved_by: ApprovedBy) -> dict[str, str]:
+    approver = _approver(approved_by)
+    if approver is None:
+        return {}
+    data = {"approved_by": approver.role}
+    if approver.person:
+        data |= {"approved_by_user": approver.person.username, "approved_by_name": approver.person.display_name}
+    if isinstance(approved_by, Approval):
+        data["request"] = str(approved_by.request.request_id)
+    return data
+
+
+def _facts_changed(approved_by: ApprovedBy, facts: Mapping[str, str]) -> ActionResult | None:
+    """An approval applies to the facts its approver was shown; refused when they are no longer the facts."""
+    if not isinstance(approved_by, Approval):
+        return None
+    shown = approved_by.request.facts
+    changed = [f"{name} {shown.get(name, '(not recorded)')} → {value}" for name, value in facts.items()
+               if shown.get(name) != value]
+    if not changed:
+        return None
+    return _refused(f"The facts changed since the request: {'; '.join(changed)}. Reject it and request again.")
+
+
+def _record(store: Store, ws: Workspace, event: Event, message: str, approved_by: ApprovedBy = "") -> ActionResult:
+    from . import workflow
+
+    decision = approved_by.decision(event.at) if isinstance(approved_by, Approval) else None
+    with workflow.recording(store, ws, event.at, Actor(event.by, event.person)):
+        store.add_control_event(event, decision)
     return ActionResult("recorded", message)
 
 
-def link(store: Store, ws: Workspace, invoice_id: str, accrual_id: str, by: str, override: bool = False,
-         reason: str = "", approved_by: str = "", now: datetime | None = None) -> ActionResult:
+def _decide(store: Store, ws: Workspace, decision: Decision) -> None:
+    from . import workflow
+
+    with workflow.recording(store, ws, decision.at, decision.approver):
+        store.add_decision(decision)
+
+
+def approvals(store: Store) -> tuple[tuple[Request, Decision | None], ...]:
+    """Every request with its decision (None while it waits), oldest first."""
+    decided = store.decisions()
+    return tuple((r, decided.get(r.request_id)) for r in store.requests())
+
+
+def pending_requests(store: Store) -> tuple[Request, ...]:
+    return tuple(r for r, d in approvals(store) if d is None)
+
+
+def _request(store: Store, ws: Workspace, cfg: ControlsConfig, request: Request) -> ActionResult:
+    same = next((r for r in pending_requests(store)
+                 if (r.action, r.item, dict(r.args), r.requester) == (request.action, request.item,
+                                                                    dict(request.args), request.requester)), None)
+    if same is not None:
+        return ActionResult("no_op", f"This already waits for approval as request {same.request_id}. "
+                                     "Nothing changed.")
+    from . import workflow
+
+    with workflow.recording(store, ws, request.at, request.requester):
+        request_id = store.add_request(request)
+    who = ", ".join(allowed_approvers(cfg, request.requester.role, request.owner))
+    return ActionResult("requested", f"Request {request_id}: {request.summary[0]}. It waits in Approvals for "
+                                     f"another person ({who}) to approve it from their own sign-in.")
+
+
+def link(store: Store, ws: Workspace, invoice_id: str, accrual_id: str, by: Actor | str, override: bool = False,
+         reason: str = "", approved_by: ApprovedBy = "", now: datetime | None = None) -> ActionResult:
     now = now or datetime.now().replace(microsecond=0)
+    by = identity.actor(by)
+    if refusal := _gate(store, by, approved_by):
+        return refusal
     c = load(store, ws, now)
     if refusal := _role_check(by, (c.cfg.ap_role,), "link invoices"):
         return refusal
@@ -1346,8 +1514,9 @@ def link(store: Store, ws: Workspace, invoice_id: str, accrual_id: str, by: str,
                                      "Nothing changed.")
     if override and not reason.strip():
         return _refused("An override link needs a reason.")
-    if override and (refusal := _approval_check(c.cfg, by, approved_by, "the person linking",
-                                                what="An override link")):
+    asks = override and _asks(store, approved_by)
+    if override and not asks and (refusal := _approval_check(c.cfg, by, _approver(approved_by), "the person linking",
+                                                             what="An override link")):
         return refusal
     if not override:
         if current is not None:
@@ -1359,20 +1528,39 @@ def link(store: Store, ws: Workspace, invoice_id: str, accrual_id: str, by: str,
                             f"{', '.join(candidates) or 'none'}); linking it needs an override with a reason "
                             "and an approver.")
     mismatches = link_mismatches(inv, s.accrual)
+    facts = {"invoice": f"{inv.supplier}, {c.currency(inv.market)} {fmt_money(inv.amount)}",
+             "accrual": f"{s.accrual.supplier}, {fmt_money(s.accrual.amount)}",
+             "differs": "; ".join(mismatches) or "none", "linked to": current.accrual_id if current else "none"}
+    if asks:
+        summary = (f"Override link of {invoice_id} to {accrual_id}",
+                   f"Invoice {inv.source}: {facts['invoice']}", f"Accrual {s.accrual.source}: {facts['accrual']}",
+                   f"Differs: {facts['differs']}",
+                   *((f"Replaces the link to {current.accrual_id}",) if current else ()),
+                   f"Reason: {reason.strip()}")
+        return _request(store, ws, c.cfg, Request(0, "link", invoice_id, {"accrual_id": accrual_id,
+                                                                      "reason": reason.strip()},
+                                              by, now, summary, facts=facts))
+    if refusal := _facts_changed(approved_by, facts):
+        return refusal
     data = {"invoice_id": invoice_id,
-            **({"override": "yes", "reason": reason.strip(), "approved_by": approved_by,
+            **({"override": "yes", "reason": reason.strip(), **_approval_data(approved_by),
                 "mismatches": "; ".join(mismatches) or "none"} if override else {})}
-    event = Event("link", accrual_id, by, now, f"invoice {inv.source}; accrual {s.accrual.source}", data)
-    return _record(store, event, f"Linked {invoice_id} to {accrual_id}" + (" (override)." if override else "."))
+    event = Event("link", accrual_id, by.role, now, f"invoice {inv.source}; accrual {s.accrual.source}", data,
+                  person=by.person)
+    return _record(store, ws, event, f"Linked {invoice_id} to {accrual_id}" + (" (override)." if override else "."),
+                   approved_by)
 
 
 def explain_needs_approval(cfg: ControlsConfig, s: AccrualState) -> bool:
     return abs(s.difference) > cfg.explain_approval_abs
 
 
-def explain(store: Store, ws: Workspace, accrual_id: str, note: str, by: str, approved_by: str = "",
+def explain(store: Store, ws: Workspace, accrual_id: str, note: str, by: Actor | str, approved_by: ApprovedBy = "",
             now: datetime | None = None) -> ActionResult:
     now = now or datetime.now().replace(microsecond=0)
+    by = identity.actor(by)
+    if refusal := _gate(store, by, approved_by):
+        return refusal
     c = load(store, ws, now)
     try:
         s = c.accrual(accrual_id)
@@ -1389,22 +1577,40 @@ def explain(store: Store, ws: Workspace, accrual_id: str, note: str, by: str, ap
         return ActionResult("no_op", f"{accrual_id} is already explained with this note. Nothing changed.")
     if s.invoice_state != "invoiced_with_variance":
         return _refused(f"{accrual_id} has no invoice variance to explain (invoice state {s.invoice_state}).")
-    if explain_needs_approval(c.cfg, s) or approved_by:
+    approver = _approver(approved_by)
+    needs = explain_needs_approval(c.cfg, s)
+    asks = needs and approver is None and _asks(store, approved_by)
+    if (needs or approver) and not asks:
         what = (f"A variance of {fmt_step(s.difference)} is over {fmt_money(c.cfg.explain_approval_abs)}; "
                 "the explanation")
-        if refusal := _approval_check(c.cfg, by, approved_by, "the person explaining", s.owner, what):
+        if refusal := _approval_check(c.cfg, by, approver, "the person explaining", s.owner, what):
             return refusal
     evidence = "; ".join(f"{l.invoice.invoice_id} {l.invoice.source}" for l in s.links)
+    facts = {"accrued": fmt_money(s.accrual.amount), "invoiced": fmt_money(s.invoiced),
+             "difference": fmt_step(s.difference)}
+    if asks:
+        ccy = c.currency(s.accrual.market)
+        summary = (f"Explanation of the {accrual_id} variance of {ccy} {facts['difference']}",
+                   f"Accrued {facts['accrued']}, invoiced {facts['invoiced']}; over the "
+                   f"{fmt_money(c.cfg.explain_approval_abs)} that needs an approver",
+                   f"Evidence: {evidence or 'no linked invoices'}", f"Note: {note}")
+        return _request(store, ws, c.cfg, Request(0, "explain", accrual_id, {"note": note}, by, now, summary, s.owner,
+                                              facts))
+    if refusal := _facts_changed(approved_by, facts):
+        return refusal
     data = {"note": note, "accrued": s.facts["accrued"], "invoiced": s.facts["invoiced"],
-            **({"approved_by": approved_by} if approved_by else {})}
-    event = Event("explain", accrual_id, by, now, evidence, data)
-    return _record(store, event, f"Explained the {accrual_id} variance of +{fmt_money(s.difference)}"
-                                 + (f", approved by {approved_by}." if approved_by else "."))
+            **_approval_data(approved_by)}
+    event = Event("explain", accrual_id, by.role, now, evidence, data, person=by.person)
+    return _record(store, ws, event, f"Explained the {accrual_id} variance of +{fmt_money(s.difference)}"
+                                 + (f", approved by {approver.label}." if approver else "."), approved_by)
 
 
-def assign(store: Store, ws: Workspace, accrual_id: str, owner: str, by: str,
+def assign(store: Store, ws: Workspace, accrual_id: str, owner: str, by: Actor | str,
            now: datetime | None = None) -> ActionResult:
     now = now or datetime.now().replace(microsecond=0)
+    by = identity.actor(by)
+    if refusal := _gate(store, by, ""):
+        return refusal
     c = load(store, ws, now)
     if refusal := _role_check(by, (c.cfg.close_lead,), "assign owners"):
         return refusal
@@ -1416,14 +1622,19 @@ def assign(store: Store, ws: Workspace, accrual_id: str, owner: str, by: str,
         return _refused(f"{owner!r} is not an active role; roles: {', '.join(c.cfg.owners)}.")
     if s.owner == owner:
         return ActionResult("no_op", f"{accrual_id} is already owned by {owner}. Nothing changed.")
-    event = Event("assign_owner", accrual_id, by, now, f"accrual {s.accrual.source}", {"owner": owner})
-    return _record(store, event, f"Assigned {accrual_id} to {owner}.")
+    event = Event("assign_owner", accrual_id, by.role, now, f"accrual {s.accrual.source}", {"owner": owner},
+                  person=by.person)
+    return _record(store, ws, event, f"Assigned {accrual_id} to {owner}.")
 
 
-def resolve(store: Store, ws: Workspace, accrual_id: str, kind: str, amount: Decimal, reason: str, by: str,
-            approved_by: str, issue: str = "", now: datetime | None = None) -> ActionResult:
-    """Record an approved resolution of one issue (ISSUE_RULES), for exactly its amount at risk."""
+def resolve(store: Store, ws: Workspace, accrual_id: str, kind: str, amount: Decimal, reason: str, by: Actor | str,
+            approved_by: ApprovedBy = "", issue: str = "", now: datetime | None = None) -> ActionResult:
+    """Record an approved resolution of one issue (ISSUE_RULES), for exactly its amount at risk. In signed-in mode
+    without an Approval it is requested instead."""
     now = now or datetime.now().replace(microsecond=0)
+    by = identity.actor(by)
+    if refusal := _gate(store, by, approved_by):
+        return refusal
     c = load(store, ws, now)
     if refusal := _role_check(by, c.cfg.owners, "record a resolution"):
         return refusal
@@ -1436,10 +1647,15 @@ def resolve(store: Store, ws: Workspace, accrual_id: str, kind: str, amount: Dec
         s = c.accrual(accrual_id)
     except ControlsError as e:
         return _refused(f"{e}.")
-    if refusal := _approval_check(c.cfg, by, approved_by, "the person resolving", s.owner, "A resolution"):
+    approver = _approver(approved_by)
+    asks = _asks(store, approved_by)
+    if not asks and (refusal := _approval_check(c.cfg, by, approver, "the person resolving", s.owner,
+                                                "A resolution")):
         return refusal
-    if any((r.data["resolve_kind"], Decimal(r.data["amount"]), r.data["reason"], r.by, r.data["approved_by"])
-           == (kind, amount, reason, by, approved_by) and issue in ("", r.data["issue"]) for r in s.resolutions):
+    if any((r.data["resolve_kind"], Decimal(r.data["amount"]), r.data["reason"], r.by)
+           == (kind, amount, reason, by.role)
+           and (approver is None or r.data["approved_by"] == approver.role) and issue in ("", r.data["issue"])
+           for r in s.resolutions):
         return ActionResult("no_op", f"{accrual_id} already has this resolution. Nothing changed.")
     open_issues = c.open_issues(accrual_id)
     if not issue:
@@ -1457,13 +1673,94 @@ def resolve(store: Store, ws: Workspace, accrual_id: str, kind: str, amount: Dec
     if kind not in rule.kinds:
         return _refused(f"{issue} may be resolved by {', '.join(rule.kinds)}, not {kind}.")
     expected = c.signal(accrual_id, issue).amount_at_risk
+    facts = {"issue": issue, "amount at risk": fmt_money(expected), "accrued": fmt_money(s.accrual.amount),
+             "invoiced": fmt_money(s.invoiced), "reversal": s.facts["reversal"]}
+    if refusal := _facts_changed(approved_by, facts):
+        return refusal
     if amount != expected:
         return _refused(f"The amount must equal the {issue} amount at risk, {fmt_money(expected)}; "
                         f"got {fmt_money(amount)}.")
+    if asks:
+        ccy = c.currency(s.accrual.market)
+        summary = (f"Resolution of {accrual_id} {issue}: {kind} {ccy} {fmt_money(amount)}",
+                   f"Accrual {s.accrual.source}: {s.accrual.supplier}, {facts['accrued']}; owner "
+                   f"{s.owner or 'none'}",
+                   f"Evidence: invoiced {facts['invoiced']}, reversal {facts['reversal']}",
+                   f"Reason: {reason}")
+        return _request(store, ws, c.cfg, Request(0, "resolve", accrual_id, {"kind": kind, "amount": str(amount),
+                                                                        "reason": reason, "issue": issue},
+                                              by, now, summary, s.owner, facts))
     data = {"issue": issue, "resolve_kind": kind, "amount": str(amount), "reason": reason,
-            "approved_by": approved_by, **s.facts}
-    event = Event("resolve", accrual_id, by, now, f"accrual {s.accrual.source}", data)
-    return _record(store, event, f"Resolved {accrual_id}: {kind} {fmt_money(amount)}, approved by {approved_by}.")
+            **_approval_data(approved_by), **s.facts}
+    event = Event("resolve", accrual_id, by.role, now, f"accrual {s.accrual.source}", data, person=by.person)
+    return _record(store, ws, event, f"Resolved {accrual_id}: {kind} {fmt_money(amount)}, approved by {approver.label}.",
+                   approved_by)
+
+
+_APPROVE: dict[ApprovalAction, Callable[[Store, Workspace, Request, Approval, datetime], ActionResult]] = {
+    "link": lambda store, ws, r, a, now: link(store, ws, r.item, r.args["accrual_id"], r.requester, override=True,
+                                              reason=r.args["reason"], approved_by=a, now=now),
+    "explain": lambda store, ws, r, a, now: explain(store, ws, r.item, r.args["note"], r.requester, a, now),
+    "resolve": lambda store, ws, r, a, now: resolve(store, ws, r.item, r.args["kind"], Decimal(r.args["amount"]),
+                                                    r.args["reason"], r.requester, a, r.args["issue"], now),
+}
+
+
+def _decider_check(store: Store, cfg: ControlsConfig, request_id: int, by: Actor) -> Request | ActionResult:
+    """The pending request, if `by` may decide it: a signed-in approver who is not the requester."""
+    if not identity.signed_in_mode(store):
+        return _refused("Approvals are for signed-in mode; in open mode the approver is given with the action.")
+    if refusal := identity.sign_in_refusal(store, by):
+        return _refused(refusal)
+    found = next(((r, d) for r, d in approvals(store) if r.request_id == request_id), None)
+    if found is None:
+        return _refused(f"No approval request {request_id}.")
+    request, decision = found
+    if decision is not None:
+        return _refused(f"Request {request_id} was already {'approved' if decision.approved else 'rejected'} by "
+                        f"{decision.approver.label}.")
+    if by.person == request.requester.person:
+        return _refused(f"You requested {request_id}; another person must decide it from their own sign-in.")
+    if by.role not in cfg.approver_roles:
+        return _refused(f"{by.role!r} may not approve; approver roles: {', '.join(cfg.approver_roles)}.")
+    return request
+
+
+def approve(store: Store, ws: Workspace, request_id: int, by: Actor, now: datetime | None = None) -> ActionResult:
+    """Records the requested action as approved by `by`, after the action's own checks pass again now and its facts
+    are those the request showed. When the action is already in place, the approval closes the request with
+    nothing to record."""
+    now = now or datetime.now().replace(microsecond=0)
+    checked = _decider_check(store, ws.config.require_controls(), request_id, by)
+    if isinstance(checked, ActionResult):
+        return checked
+    requester = store.user(checked.requester.person.username)
+    if requester is None or not requester.active or checked.requester.role not in requester.roles:
+        return _refused(f"The requester {checked.requester.label} no longer holds that role; reject the request.")
+    result = _APPROVE[checked.action](store, ws, checked, Approval(checked, by), now)
+    if result.outcome != "no_op":
+        return result
+    already = result.message.removesuffix(" Nothing changed.")
+    _decide(store, ws, Decision(request_id, True, by, checked.requester.person, now, f"Nothing to record: {already}"))
+    return ActionResult("recorded", f"Approved request {request_id} with nothing to record: {already} "
+                                    "The request is closed.")
+
+
+def reject(store: Store, ws: Workspace, request_id: int, by: Actor, reason: str,
+           now: datetime | None = None) -> ActionResult:
+    now = now or datetime.now().replace(microsecond=0)
+    checked = _decider_check(store, ws.config.require_controls(), request_id, by)
+    if isinstance(checked, ActionResult):
+        return checked
+    if not reason.strip():
+        return _refused("A rejection needs a reason.")
+    _decide(store, ws, Decision(request_id, False, by, checked.requester.person, now, reason.strip()))
+    return ActionResult("recorded", f"Rejected request {request_id}: {checked.summary[0]}.")
+
+
+def decision_text(d: Decision) -> str:
+    verdict = "Approved" if d.approved else "Rejected"
+    return f"{verdict} by {d.approver.label}" + (f": {d.reason}" if d.reason else "")
 
 
 # Previews

@@ -46,7 +46,8 @@ class Submission:
     scenario: str
     file_name: str
     sheet: str | None
-    received_at: datetime
+    received_at: datetime  # effective: the time given with --received-at, else when it was received
+    logged_at: datetime | None = None  # the real clock in signed-in mode (docs/design-logins.md)
 
 
 def closest_header(name: str, headers: tuple[str, ...]) -> str | None:

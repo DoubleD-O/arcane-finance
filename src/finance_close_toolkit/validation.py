@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
+from . import identity
 from .config import ChartOfAccounts, Mapping, Workspace
 from .intake import IntakeError, RawRow, Submission, closest_header, read_source
 from .money import ZERO, fmt_amount
@@ -253,7 +254,13 @@ def ingest(
     period: str,
     scenario: str,
     received_at: datetime | None = None,
+    by: identity.Actor | str | None = None,
 ) -> IngestResult:
+    """`by` is who sends the file; in signed-in mode a signed-in person (IdentityError otherwise). What the file
+    changes in the needs-attention items is recorded with it, at the receipt time."""
+    from . import workflow  # the workflow reads the close board, which reads validations
+
+    by = identity.require_signed_in(store, by)
     _check_slot(ws, market, period, scenario)
     path = Path(path)
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -265,13 +272,14 @@ def ingest(
     existing = store.submission(sid)
     if existing is not None:
         # Bytes that are already the slot's latest change nothing; older bytes sent again are a new receipt.
-        if previous.submission_id != sid:
-            store.add_receipt(sid, received_at)
         validation = store.validation(sid, mapping.version)
         revalidated = validation is None
-        if revalidated:
-            validation = _validate_stored(store, ws, existing)
-            store.save_validation(validation, mapping)
+        with workflow.recording(store, ws, received_at, by, period):
+            if previous.submission_id != sid:
+                store.add_receipt(sid, received_at, by)
+            if revalidated:
+                validation = _validate_stored(store, ws, existing)
+                store.save_validation(validation, mapping)
         latest = store.latest_submission(market, period, scenario)
         return IngestResult(store.submission(sid), validation, True, revalidated, previous, latest)
 
@@ -279,7 +287,8 @@ def ingest(
     submission = Submission(sid, market, period, scenario, path.name, table.sheet, received_at)
     currency = ws.config.market(market).currency
     validation = validate(sid, period, currency, table.headers, table.rows, mapping, ws.coa)
-    store.save_submission(submission, content_hash, table.headers, table.rows, validation, mapping)
+    with workflow.recording(store, ws, received_at, by, period):
+        store.save_submission(submission, content_hash, table.headers, table.rows, validation, mapping, by)
     latest = store.latest_submission(market, period, scenario)
     return IngestResult(submission, validation, False, False, previous, latest)
 
@@ -304,8 +313,19 @@ class RevalidateResult:
     new: bool
 
 
-def revalidate(store: Store, ws: Workspace, period: str) -> tuple[RevalidateResult, ...]:
+def revalidate(store: Store, ws: Workspace, period: str, by: identity.Actor | str | None = None,
+               at: datetime | None = None) -> tuple[RevalidateResult, ...]:
+    """What the new validations change in the needs-attention items is recorded with them, at `at` (default:
+    the store's clock)."""
+    from . import workflow
+
+    by = identity.require_signed_in(store, by)
     check_period(period)
+    with workflow.recording(store, ws, at or store.clock(), by, period):
+        return _revalidate(store, ws, period)
+
+
+def _revalidate(store: Store, ws: Workspace, period: str) -> tuple[RevalidateResult, ...]:
     results = []
     for market in ws.config.markets:
         for scenario in ws.config.scenarios:

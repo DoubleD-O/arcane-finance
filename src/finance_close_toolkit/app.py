@@ -12,8 +12,8 @@ from typing import Callable
 import altair as alt
 import streamlit as st
 
-from finance_close_toolkit import (attention, controls, deck, deck_pack, demo, plan_budget, planning, release, validation,
-                                   variance, xlsx)
+from finance_close_toolkit import (attention, controls, deck, deck_pack, demo, identity, plan_budget, planning, release,
+                                   validation, variance, workflow, xlsx)
 from finance_close_toolkit.commentary import parse_commentary
 from finance_close_toolkit.config import ConfigError, Workspace, load_workspace
 from finance_close_toolkit.intake import IntakeError, InspectReport, inspect
@@ -33,6 +33,10 @@ class Page:
     ws: Workspace
     store: Store
     period: str
+    actor: identity.Actor | None = None  # the signed-in person; None in open mode
+
+
+Role = identity.Actor | str  # who acts on close controls: the signed-in person, or the role chosen in open mode
 
 
 def words(code: str) -> str:
@@ -100,6 +104,84 @@ def diff_tables(d: Diff, ws: Workspace, accounts: bool = True, currency: str | N
                 "After": fmt_amount(a.after), "Change": fmt_amount(a.change)} for a in d.accounts])
 
 
+# Needs-attention workflow on the cards (docs/design-attention.md)
+
+
+def item_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
+
+
+def queue_attention(kind: str, key: str) -> None:
+    st.session_state["attention_action"] = (kind, key)
+
+
+def attention_role(p: Page, key: str) -> identity.Actor:
+    """Who acts on items: the signed-in person, or in open mode the role chosen here."""
+    if p.actor is not None:
+        return p.actor
+    return identity.Actor(st.selectbox("Acting as", identity.known_roles(p.ws)[:-1], key=key))
+
+
+def run_attention_action(p: Page, by: identity.Actor, as_of: datetime | None) -> None:
+    """The action a card's button queued, run before the page reads the items."""
+    if not (pending := st.session_state.pop("attention_action", None)):
+        return
+    kind, key = pending
+    k = item_key(key)
+    due = _value(f"att_due_{k}", None)
+    result = workflow.act(p.store, p.ws, key, kind, by, as_of, note=_value(f"att_note_{k}"),
+                          to=_value(f"att_to_{k}"), due=due if isinstance(due, date) else None)
+    ACTION_BOX[result.outcome](esc(result.message))
+
+
+def workflow_lines(i: workflow.Item | None) -> list[str]:
+    if i is None:
+        return []
+    return [f"State: {words(i.state)}" + (f" by {i.acknowledged_by}" if i.state == "acknowledged" else "")
+            + (" (new evidence)" if i.new_evidence and i.is_open else ""),
+            f"Assignee: {i.assignee_label or 'none'}",
+            f"Item due: {i.due.isoformat()}" + (", overdue" if i.overdue else ", not overdue")]
+
+
+def attention_actions(p: Page, i: workflow.Item | None, by: identity.Actor) -> None:
+    """The actions this person may take on the item, and nothing else."""
+    if i is None:
+        return
+    allowed = workflow.permitted(i, by)
+    k = item_key(i.key)
+    if not allowed:
+        st.caption(esc(f"{by.label} may not act on this item."))
+        return
+    if "ack" in allowed and i.state != "acknowledged" or "comment" in allowed:
+        st.text_input("Note", key=f"att_note_{k}")
+    cols = st.columns(4)
+    if "ack" in allowed and i.state != "acknowledged":
+        cols[0].button("Acknowledge", key=f"att_ack_{k}", on_click=queue_attention, args=("ack", i.key))
+    if "assign" in allowed:
+        cols[1].selectbox("Assign to", workflow.suitable_assignees(p.store, p.ws, i), key=f"att_to_{k}")
+        cols[1].button("Assign", key=f"att_assign_{k}", on_click=queue_attention, args=("assign", i.key))
+    if "due" in allowed:
+        cols[2].date_input("Due date", value=i.due, key=f"att_due_{k}")
+        cols[2].button("Set due date", key=f"att_setdue_{k}", on_click=queue_attention, args=("due", i.key))
+    if "comment" in allowed:
+        cols[3].button("Comment", key=f"att_comment_{k}", on_click=queue_attention, args=("comment", i.key))
+
+
+def my_items(p: Page) -> None:
+    by = attention_role(p, "my_items_role")
+    as_of = parse_when(st.text_input("As of (YYYY-MM-DD HH:MM, blank for now)", key="as_of"), "As of")
+    run_attention_action(p, by, as_of)
+    found = workflow.mine(workflow.load(p.store, p.ws, as_of, p.period), by)
+    st.write(esc(f"Assigned to {by.label}: {len(found)} open item{'s' * (len(found) != 1)}, overdue first."))
+    for i in found:
+        with st.container(border=True):
+            st.markdown(f"**{esc(f'{words(i.condition.type)}: {i.condition.scope} ({i.condition.period})')}**"
+                        + (" (overdue)" if i.overdue else ""))
+            st.markdown("\n".join("- " + esc(line) for line in [
+                f"Trigger: {i.condition.trigger}", f"Owner: {i.condition.owner}", *workflow_lines(i)]))
+            attention_actions(p, i, by)
+
+
 # Close board
 
 
@@ -113,7 +195,8 @@ def close_board(p: Page) -> None:
     for v in b.slots:
         s, sub = v.slot, v.slot.submission
         rows.append({"Market": s.market.code, "Scenario": s.scenario, "Status": words(v.status),
-                     "File": sub.file_name if sub else "", "Received": when(sub.received_at) if sub else "",
+                     "File": sub.file_name if sub else "",
+                     "Received": identity.when_text(sub.received_at, sub.logged_at) if sub else "",
                      "Exceptions": str(len(s.validation.exceptions)) if s.validation else "", "Note": v.note})
     table(rows)
     if b.changes is not None:
@@ -122,7 +205,12 @@ def close_board(p: Page) -> None:
     st.subheader("Needs attention")
     if not b.signals:
         st.write("Nothing needs attention.")
+    else:
+        by = attention_role(p, "board_role")
+        run_attention_action(p, by, as_of)
+        items = workflow.load(p.store, p.ws, b.as_of, p.period).by_key()
     for i, s in enumerate(b.signals, 1):
+        item = items.get(workflow.board_key(s.period, s.type, s.market, s.scenario))
         with st.container(border=True):
             st.markdown(f"**{i}. {esc(f'{words(s.type)}: {s.market} {s.scenario}')}**"
                         + (" (overdue)" if s.overdue else ""))
@@ -132,7 +220,9 @@ def close_board(p: Page) -> None:
                 f"Trigger: {s.trigger}",
                 f"Release: {s.release_id or 'none'}",
                 f"Next action: {s.next_action}",
+                *workflow_lines(item),
             ]))
+            attention_actions(p, item, by)
             if s.exceptions:
                 st.markdown("Exceptions")
                 table([{"Code": e.code, "Row": "" if e.row is None else str(e.row), "Detail": e.detail}
@@ -250,7 +340,7 @@ def submit(p: Page) -> None:
     confirmed = label is None or st.checkbox(label, key=f"confirm_{path.parent.name}_{market}_{scenario}")
     if st.button("Ingest", type="primary", disabled=not confirmed):
         received = parse_when(received_text, "Received at")
-        r = validation.ingest(p.store, p.ws, path, market, p.period, scenario, received)
+        r = validation.ingest(p.store, p.ws, path, market, p.period, scenario, received, by=p.actor)
         st.session_state.pop("demo_notice", None)
         RESULT_BOX[r.validation.state](esc(ingest_message(r)))
         show_validation(r.validation, markets[market].currency)
@@ -266,11 +356,12 @@ def approve(checksum: str) -> None:
 
 def publish_reviewed(p: Page, checksum: str) -> release.PublishResult | None:
     """Publishes only the proposal the approver saw; the library refuses if it changed since."""
-    approver = st.session_state.get("approved_by", "").strip()
+    approver = p.actor or st.session_state.get("approved_by", "").strip()
     if not approver:
         st.error("Enter who approves this release before publishing.")
         return None
     done = release.publish(p.store, p.ws, p.period, approved_by=approver, expected_checksum=checksum)
+    approver = identity.actor(approver).label
     previous = done.proposal.current.release_id if done.proposal.current else "none"
     if done.outcome == "published":
         st.session_state.pop("demo_notice", None)
@@ -315,7 +406,10 @@ def review(p: Page) -> None:
     st.markdown("\n".join("- " + esc(f"{s.market.code} {s.scenario}: {s.submission.file_name}, "
                                      f"received {when(s.submission.received_at)}")
                           for s in r.proposal.slots if s.changes_release))
-    st.text_input("Approved by (required)", key="approved_by")
+    if p.actor is None:
+        st.text_input("Approved by (required)", key="approved_by")
+    else:
+        st.caption(esc(f"You approve as {p.actor.label}; publishing needs {p.ws.config.regional_owner}."))
     st.button("Approve and publish", type="primary", on_click=approve, args=(r.facts_checksum,))
 
 
@@ -554,7 +648,7 @@ def _value(key: str, default=""):
     return default if value is None else value
 
 
-def _resolve(p: Page, role: str, item: str, now: datetime | None) -> controls.ActionResult:
+def _resolve(p: Page, role: Role, item: str, now: datetime | None) -> controls.ActionResult:
     text = _value(f"resolve_amount_{item}")
     try:
         amount = parse_amount(text)
@@ -576,11 +670,15 @@ CONTROL_ACTIONS: dict[str, Callable[[Page, str, str, datetime | None], controls.
                                                          now),
     "resolve": _resolve,
 }
-ACTION_BOX = {"recorded": st.success, "no_op": st.info, "refused": st.error}
+ACTION_BOX = {"recorded": st.success, "no_op": st.info, "refused": st.error, "requested": st.success}
 
 
-def approver_select(c: controls.Controls, role: str, owner: str | None, key: str) -> None:
-    """Blank until chosen; offers only approver roles other than the person acting and the accrual's owner."""
+def approver_select(c: controls.Controls, role: Role, owner: str | None, key: str) -> None:
+    """Open mode: blank until chosen; offers only approver roles other than the person acting and the accrual's
+    owner. Signed in: the action goes to Approvals for another person."""
+    if isinstance(role, identity.Actor):
+        st.caption("A second person approves this from their own sign-in: it waits on the Approvals page.")
+        return
     st.selectbox("Approved by", controls.allowed_approvers(c.cfg, role, owner), index=None,
                  placeholder="Choose an approver", key=key)
 
@@ -652,7 +750,9 @@ SIGNAL_FORMS: dict[str, Callable[[controls.Controls, controls.Signal, str], None
 }
 
 
-def signal_card(c: controls.Controls, i: int, s: controls.Signal, role: str) -> None:
+def signal_card(c: controls.Controls, i: int, s: controls.Signal, role: str, p: Page | None = None,
+                items: dict[str, workflow.Item] | None = None) -> None:
+    item = (items or {}).get(workflow.controls_key(s.type, s.item))
     with st.container(border=True):
         st.markdown(f"**{i}. {esc(f'{words(s.type)}: {s.item}')}**")
         st.markdown("\n".join("- " + esc(line) for line in [
@@ -661,8 +761,11 @@ def signal_card(c: controls.Controls, i: int, s: controls.Signal, role: str) -> 
             f"Trigger: {s.trigger}",
             *(f"Evidence: {e}" for e in s.evidence),
             f"Next action: {s.next_action}",
+            *workflow_lines(item),
         ]))
         SIGNAL_FORMS[s.type](c, s, role)
+        if p is not None:
+            attention_actions(p, item, identity.actor(role))
 
 
 def queue_tabs(c: controls.Controls) -> dict[str, tuple[str, ...]]:
@@ -675,7 +778,8 @@ def queue_tabs(c: controls.Controls) -> dict[str, tuple[str, ...]]:
 
 def pending_rows(entries) -> list[dict]:
     return [{"Accrual": e.accrual_id, "Period": e.period, "Kind": e.kind, "Dr": e.debit, "Cr": e.credit,
-             "P&L effect": fmt_step(e.pl_effect), "Approved by": e.resolution.data["approved_by"]} for e in entries]
+             "P&L effect": fmt_step(e.pl_effect), "Approved by": controls.approver_text(e.resolution.data)}
+            for e in entries]
 
 
 def accrual_detail(c: controls.Controls, accrual_id: str) -> None:
@@ -690,7 +794,7 @@ def accrual_detail(c: controls.Controls, accrual_id: str) -> None:
         f"tolerance {fmt_money(s.tolerance)}",
     ]
     if s.explained:
-        lines.append(f"Variance explained by {s.explained.by}: {s.explained.data['note']}")
+        lines.append(f"Variance explained by {s.explained.by_label}: {s.explained.data['note']}")
     lines += [f"Resolution: {controls.resolution_text(r)}" for r in s.resolutions]
     lines += [f"{lapse.what}: {'; '.join(lapse.changes)}" for lapse in s.lapsed]
     st.markdown("\n".join("- " + esc(line) for line in lines))
@@ -705,7 +809,7 @@ def accrual_detail(c: controls.Controls, accrual_id: str) -> None:
         st.markdown(f"**{controls.PENDING_HEADING} ({ccy})**")
         table(pending_rows(pending))
     st.markdown("**History**")
-    table([{"When": when(h.at), "What": h.what, "By": h.by, "Detail": h.detail}
+    table([{"When": h.when, "What": h.what, "By": h.by, "Detail": h.detail}
            for h in controls.history(c, accrual_id)])
 
 
@@ -788,8 +892,12 @@ def pl_table(c: controls.Controls, market: str, period: str) -> None:
 def close_controls(p: Page) -> None:
     cfg = p.ws.config.require_controls()
     heading = st.empty()
-    role = st.selectbox("Acting as", cfg.owners, key="controls_role")
-    st.caption("Roles are what you assert here, not a login: nothing checks who you are.")
+    if p.actor is None:
+        role: Role = st.selectbox("Acting as", cfg.owners, key="controls_role")
+        st.caption("Roles are what you assert here, not a login: nothing checks who you are.")
+    else:
+        role = p.actor
+        st.caption(esc(f"Acting as {p.actor.label}; change the role in the sidebar."))
     as_of = parse_when(st.text_input("As of (YYYY-MM-DD HH:MM, blank for now)", key="as_of"), "As of")
     if pending := st.session_state.pop("controls_action", None):
         action, item = pending
@@ -798,7 +906,9 @@ def close_controls(p: Page) -> None:
             st.session_state.pop("demo_notice", None)
         ACTION_BOX[result.outcome](esc(result.message))
     import_controls(p, role, as_of)
+    run_attention_action(p, identity.actor(role), as_of)
     c = controls.load(p.store, p.ws, as_of)
+    items = workflow.load(p.store, p.ws, c.as_of).by_key()
     heading.header(controls_heading(c))
     if not c.accruals and not c.imports:
         st.write("No accruals imported yet. Import the files above, or load the close controls demo.")
@@ -813,7 +923,7 @@ def close_controls(p: Page) -> None:
             if not sigs:
                 st.write("Nothing in this queue.")
             for i, s in enumerate(sigs, 1):
-                signal_card(c, i, s, role)
+                signal_card(c, i, s, role, p, items)
             if label == cfg.ap_role:
                 for m in (m for m in c.unmatched if not m.candidates and not m.referenced):
                     with st.container(border=True):
@@ -834,6 +944,49 @@ def close_controls(p: Page) -> None:
     if c.accruals:
         accrual_id = st.selectbox("Accrual", [s.accrual_id for s in c.accruals], key="controls_detail")
         accrual_detail(c, accrual_id)
+
+
+# Approvals: two-person actions waiting for a second person (signed-in mode)
+
+
+def queue_decision(decision: str, request_id: int) -> None:
+    st.session_state["approval_action"] = (decision, request_id)
+
+
+def approvals_page(p: Page) -> None:
+    st.header("Approvals")
+    if p.actor is None:
+        st.write("No users yet, so a second person is named with the action itself (Approved by). "
+                 + esc(identity.OPEN_MODE))
+        return
+    if pending := st.session_state.pop("approval_action", None):
+        decision, request_id = pending
+        if decision == "approve":
+            result = controls.approve(p.store, p.ws, request_id, p.actor)
+        else:
+            result = controls.reject(p.store, p.ws, request_id, p.actor,
+                                     _value(f"reject_reason_{request_id}"))
+        ACTION_BOX[result.outcome](esc(result.message))
+    rows = controls.approvals(p.store)
+    waiting = [r for r, d in rows if d is None]
+    st.write(esc(f"Waiting for approval: {len(waiting)}. You act as {p.actor.label}."))
+    for r in waiting:
+        with st.container(border=True):
+            st.markdown(f"**{esc(f'Request {r.request_id}: {r.summary[0]}')}**")
+            st.markdown("\n".join("- " + esc(line) for line in [
+                f"Requested by {r.requester.label} ({identity.when_text(r.at, r.logged_at)})", *r.summary[1:]]))
+            st.text_input("Reason, to reject", key=f"reject_reason_{r.request_id}")
+            left, right = st.columns(2)
+            left.button(f"Approve {r.request_id}", key=f"approve_{r.request_id}", type="primary",
+                        on_click=queue_decision, args=("approve", r.request_id))
+            right.button(f"Reject {r.request_id}", key=f"reject_{r.request_id}", on_click=queue_decision,
+                         args=("reject", r.request_id))
+    decided = [(r, d) for r, d in rows if d is not None]
+    if decided:
+        st.subheader("Decided")
+        table([{"Request": str(r.request_id), "What": r.summary[0], "Requested by": r.requester.label,
+                "Decision": controls.decision_text(d), "When": identity.when_text(d.at, d.logged_at)}
+               for r, d in decided])
 
 
 # Planning: reads a plan file only; close.toml only to export a plan month as a budget submission
@@ -1005,9 +1158,11 @@ PAGES: dict[str, Callable[[Page], None]] = {
     "Results": results,
     "Releases and downloads": releases,
     "Close controls": close_controls,
+    "Approvals": approvals_page,
+    "My items": my_items,
 }
 # Pages that write their own heading and do not use the sidebar period.
-OWN_HEADING = {"Close controls"}
+OWN_HEADING = {"Close controls", "Approvals"}
 # Pages that do not open the store (Planning reads close.toml only for its budget export).
 STANDALONE: dict[str, Callable[[], None]] = {"Planning": planning_page}
 
@@ -1053,24 +1208,98 @@ def load_controls_demo() -> None:
                                              f"Store {workdir / 'store.duckdb'}.")
 
 
+# Signing in (docs/design-logins.md): only the session token is kept in the browser session, never the password
+
+
+@dataclass(frozen=True)
+class Account:
+    signed_in_mode: bool
+    session: identity.Session | None
+    error: str | None = None  # the account could not be read: nothing is shown, never open-mode controls
+
+    @property
+    def needs_sign_in(self) -> bool:
+        return self.signed_in_mode and self.session is None
+
+
+def account() -> Account:
+    """Open mode only when the store has no users or does not exist yet; any other failure fails closed."""
+    path = st.session_state["store_path"]
+    if not Path(path).exists():
+        return Account(False, None)
+    try:
+        with Store.open(path) as store:
+            on = identity.signed_in_mode(store)
+            return Account(on, identity.session(store, st.session_state.get("session_token")) if on else None)
+    except Exception as e:
+        return Account(True, None, f"Cannot read who is signed in to this store ({type(e).__name__}: {e}). "
+                                   "Nothing is shown until it can be read.")
+
+
+def sign_out() -> None:
+    with Store.open(st.session_state["store_path"]) as store:
+        identity.end_session(store, st.session_state.pop("session_token", None))
+
+
+def account_panel(a: Account) -> identity.Actor | None:
+    """The person, their acting role (one of their own) and Sign out; the open-mode note without users."""
+    if a.error is not None or (a.signed_in_mode and a.session is None):
+        return None
+    if not a.signed_in_mode:
+        st.caption(esc(identity.OPEN_MODE))
+        return None
+    user = a.session.user
+    st.markdown(esc(f"Signed in as {user.display_name} ({user.username})"))
+    role = st.selectbox("Acting as", user.roles, key="acting_role")
+    st.button("Sign out", on_click=sign_out)
+    return identity.act(user, role)
+
+
+def sign_in_form() -> None:
+    st.header("Sign in")
+    st.write("This store has users, so every page needs a signed-in user.")
+    with st.form("sign_in", clear_on_submit=True):
+        username = st.text_input("Username", key="sign_in_username")
+        password = st.text_input("Password", type="password", key="sign_in_password")
+        submitted = st.form_submit_button("Sign in", type="primary", key="sign_in_submit")
+    if not submitted:
+        return
+    try:
+        with Store.open(st.session_state["store_path"]) as store:
+            user = identity.sign_in(store, username, password)
+            st.session_state["session_token"] = identity.start_session(store, user)
+    except identity.IdentityError as e:
+        st.error(esc(str(e)))
+        return
+    st.rerun()
+
+
 def sidebar():
-    """Returns the chosen page and the place for the demo notice. main fills it after the page ran,
-    so ingesting or publishing, which clears the notice, removes it in the same run."""
+    """Returns the chosen page, the place for the demo notice, and who is acting. main fills the notice after the
+    page ran, so ingesting or publishing, which clears the notice, removes it in the same run."""
     # `fct ui --store/--config/--fx-dir` passes its options through the environment.
     defaults = {"store_path": os.environ.get("FCT_STORE", str(DEFAULT_STORE)),
                 "config_path": os.environ.get("FCT_CONFIG", "config/close.toml"), "period": last_month(),
                 "as_of": "", "plan_path": DEFAULT_PLAN, "demo_step": demo.STEP_IDS[-1], "controls_demo_step": demo.CONTROL_STEP_IDS[0]}
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
-    # Streamlit drops a widget's value on runs that don't draw it; reassigning keeps As of across pages.
-    st.session_state["as_of"] = st.session_state["as_of"]
-    st.session_state["plan_path"] = st.session_state["plan_path"]
+    # Streamlit drops a widget's value on runs that don't draw it; reassigning keeps each across pages and across
+    # the signed-out runs that hide the page list and the store path.
+    for key in ("as_of", "plan_path", "page", "period", "store_path", "config_path"):
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
+    signed_in = account()
     with st.sidebar:
         st.title("APAC close")
-        page = st.radio("Page", [*PAGES, *STANDALONE], key="page")
-        st.text_input("Period (YYYY-MM)", key="period")
-        st.text_input("Store file", key="store_path")
-        st.text_input("Config file (close.toml)", key="config_path")
+        page = None
+        if signed_in.error is None and not signed_in.needs_sign_in:
+            page = st.radio("Page", [*PAGES, *STANDALONE], key="page")
+            st.text_input("Period (YYYY-MM)", key="period")
+            st.text_input("Store file", key="store_path")
+            st.text_input("Config file (close.toml)", key="config_path")
+        elif signed_in.error is not None:
+            st.text_input("Store file", key="store_path")  # so another store can be chosen
+        actor = account_panel(signed_in)
         with st.expander("Demo"):
             steps = {s.id: s.title for s in demo.STEPS}
             st.selectbox("Load demo up to step", demo.STEP_IDS, key="demo_step",
@@ -1081,10 +1310,10 @@ def sidebar():
                          format_func=lambda i: f"{i}  {controls_steps[i]}")
             st.button("Load close controls demo", on_click=load_controls_demo)
             notice_box = st.empty()
-    return page, notice_box
+    return page, notice_box, signed_in, actor
 
 
-def run_page(page: str) -> None:
+def run_page(page: str, actor: identity.Actor | None = None) -> None:
     if page in STANDALONE:
         try:
             STANDALONE[page]()
@@ -1106,7 +1335,7 @@ def run_page(page: str) -> None:
         fx_dir = os.environ.get("FCT_FX_DIR")
         ws = load_workspace(Path(st.session_state["config_path"]), Path(fx_dir) if fx_dir else None)
         with Store.open(st.session_state["store_path"]) as store:
-            PAGES[page](Page(ws, store, period))
+            PAGES[page](Page(ws, store, period, actor))
     except READABLE_ERRORS as e:
         st.error(esc(str(e)))
     except Exception as e:  # a readable line instead of a traceback, whatever the library raised
@@ -1115,8 +1344,13 @@ def run_page(page: str) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="APAC close", layout="wide")
-    page, notice_box = sidebar()
-    run_page(page)
+    page, notice_box, signed_in, actor = sidebar()
+    if signed_in.error is not None:
+        st.error(esc(signed_in.error))
+    elif signed_in.needs_sign_in:
+        sign_in_form()
+    else:
+        run_page(page, actor)
     if notice := st.session_state.get("demo_notice"):
         (notice_box.success if notice[0] == "ok" else notice_box.error)(esc(notice[1]))
 

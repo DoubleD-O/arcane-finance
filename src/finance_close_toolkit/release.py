@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
+from . import identity
 from .config import ChartOfAccounts, FxRates, Market, Workspace, parse_chart_of_accounts, parse_mapping, version_of
 from .intake import Submission
 from .kpi import Diff, balances, diff, totals
@@ -69,6 +70,18 @@ class SlotManifest:
 
 
 @dataclass(frozen=True)
+class OpenItem:
+    """A needs-attention item still open when the release was approved (docs/design-attention.md)."""
+
+    key: str
+    type: str
+    scope: str
+    state: str
+    assignee: str
+    due: str
+
+
+@dataclass(frozen=True)
 class Release:
     release_id: str
     period: str
@@ -81,6 +94,7 @@ class Release:
     coa_version: str
     kpi_totals: dict[str, dict[str, dict[str, Decimal]]]
     facts_checksum: str
+    open_items: tuple[OpenItem, ...] = ()
 
     @property
     def seq(self) -> int:
@@ -112,6 +126,7 @@ class Release:
                 for sc, by in self.kpi_totals.items()
             },
             "facts_checksum": self.facts_checksum,
+            "open_items": [dict(o.__dict__) for o in self.open_items],
         }
 
     @staticmethod
@@ -141,6 +156,7 @@ class Release:
                 for sc, by in m["kpi_totals"].items()
             },
             facts_checksum=m["facts_checksum"],
+            open_items=tuple(OpenItem(**o) for o in m.get("open_items", [])),
         )
 
     def slot(self, market: str, scenario: str) -> SlotManifest | None:
@@ -284,7 +300,7 @@ def publish(
     store: Store,
     ws: Workspace,
     period: str,
-    approved_by: str | None = None,
+    approved_by: identity.Actor | str | None = None,
     now: datetime | None = None,
     fault: Callable[[], None] | None = None,
     expected_checksum: str | None = None,
@@ -292,8 +308,11 @@ def publish(
     """Dry run unless approved_by is given. With `expected_checksum` (the facts checksum of the
     proposal the approver reviewed), anything else is refused and nothing is written.
     `fault` runs inside the transaction after the facts are written and before the pointer
-    moves, so tests can prove the rollback."""
+    moves, so tests can prove the rollback. In signed-in mode the approver is a signed-in person
+    acting in the regional owner role; in open mode it is the role typed."""
     proposal = propose(store, ws, period)
+    if approved_by is not None and (refusal := approver_refusal(store, ws, identity.actor(approved_by))):
+        return PublishResult("refused", None, proposal, None, reasons=(refusal,))
     facts = proposal.facts
     if facts is None:
         return PublishResult("refused", None, proposal, None, reasons=proposal.blockers)
@@ -308,12 +327,16 @@ def publish(
     if approved_by is None:
         return PublishResult("dry_run", release_id, proposal, change, checksum)
 
+    from . import workflow  # the workflow reads the close board, which proposes releases
+
+    approved_at = now or datetime.now().replace(microsecond=0)
+    open_at = workflow.open_items(store, ws, period, approved_at)
     release = Release(
         release_id=release_id,
         period=period,
         previous_release_id=current.release_id if current else None,
-        approved_by=approved_by,
-        approved_at=now or datetime.now().replace(microsecond=0),
+        approved_by=identity.actor(approved_by).label,
+        approved_at=approved_at,
         reporting_currency=ws.config.reporting_currency,
         slots=tuple(
             SlotManifest(
@@ -330,9 +353,20 @@ def publish(
         coa_version=ws.coa.version,
         kpi_totals=totals(facts, ws.coa),
         facts_checksum=checksum,
+        open_items=tuple(OpenItem(i.key, i.condition.type, i.condition.scope, i.state, i.assignee_label or "",
+                                  i.due.isoformat()) for i in open_at),
     )
-    store.publish_release(release, facts, ws.coa, fault=fault)
+    with workflow.recording(store, ws, release.approved_at, approved_by, period):
+        store.publish_release(release, facts, ws.coa, fault=fault)
     return PublishResult("published", release_id, proposal, change, checksum)
+
+
+def approver_refusal(store: Store, ws: Workspace, by: identity.Actor) -> str | None:
+    if refusal := identity.sign_in_refusal(store, by):
+        return refusal
+    if by.person is not None and by.role != ws.config.regional_owner:
+        return f"Publishing needs someone acting as {ws.config.regional_owner}; {by.label} is not."
+    return None
 
 
 def _require(store: Store, release_id: str) -> Release:

@@ -7,14 +7,15 @@ as library calls.
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Mapping
 
 from . import controls, release, validation
 from .config import Workspace, load_workspace
+from .identity import Actor
 
 if TYPE_CHECKING:
     from .store import Store
@@ -31,6 +32,10 @@ class Context:
     workdir: Path  # holds config/ and fx/, which the story edits
     examples: Path
     now: datetime | None  # approval time; None means the wall clock
+    actors: Mapping[str, Actor] = field(default_factory=dict)  # signed-in mode: who acts in each role
+
+    def by(self, role: str) -> Actor | str:
+        return self.actors.get(role, role)
 
     @property
     def config_path(self) -> Path:
@@ -39,17 +44,18 @@ class Context:
     def ingest(self, name: str, market: str, scenario: str, received: str) -> None:
         ws = load_workspace(self.config_path)
         validation.ingest(self.store, ws, self.examples / name, market, PERIOD, scenario,
-                          datetime.fromisoformat(received))
+                          datetime.fromisoformat(received), by=self.by(ws.config.market(market).owner))
 
     def publish(self) -> None:
-        release.publish(self.store, load_workspace(self.config_path), PERIOD, approved_by=APPROVER, now=self.now)
+        release.publish(self.store, load_workspace(self.config_path), PERIOD, approved_by=self.by(APPROVER),
+                        now=self.now)
 
     def map_consulting_to_oth(self) -> None:
         with open(self.workdir / "config" / "mappings" / "au.toml", "a", encoding="utf-8", newline="\n") as f:
             f.write('"64000" = "OTH"\n')
 
     def revalidate(self) -> None:
-        validation.revalidate(self.store, load_workspace(self.config_path), PERIOD)
+        validation.revalidate(self.store, load_workspace(self.config_path), PERIOD, by=self.by(APPROVER))
 
 
 def _e1(c: Context) -> None:
@@ -118,12 +124,14 @@ def prepare(workdir: Path) -> Path:
 
 
 def replay(
-    store: Store, workdir: Path, until: str, examples: Path = EXAMPLES, now: datetime | None = None
+    store: Store, workdir: Path, until: str, examples: Path = EXAMPLES, now: datetime | None = None,
+    actors: Mapping[str, Actor] | None = None,
 ) -> Step:
     """Apply every state-changing step up to and including `until` to a fresh store and a
-    `workdir` prepared with `prepare`. Returns the step reached."""
+    `workdir` prepared with `prepare`. Returns the step reached. `actors` (signed-in mode) names who
+    acts in each role; without it the steps act as bare roles (open mode)."""
     last = step(until)
-    context = Context(store, Path(workdir), Path(examples), now)
+    context = Context(store, Path(workdir), Path(examples), now, dict(actors or {}))
     for s in STEPS[: STEPS.index(last) + 1]:
         if s.action is not None:
             s.action(context)
